@@ -308,7 +308,8 @@ struct ViewHierarchyHandler: HTTPHandler {
 
     private func elementHierarchy(xcuiElement: XCUIElement) throws -> AXElement {
         let snapshot = try xcuiElement.snapshot()
-        return elementHierarchy(snapshot: snapshot, inheritedOffset: .zero, parentWindowContextID: nil)
+        return elementHierarchy(snapshot: snapshot, inheritedOffset: .zero, parentWindowContextID: nil,
+                                parentFrame: nil, parentIsRemote: nil, visibleHostAnchor: nil)
     }
 
     /// Walks the snapshot tree (not `dictionaryRepresentation`, which is O(subtree)
@@ -317,7 +318,10 @@ struct ViewHierarchyHandler: HTTPHandler {
     private func elementHierarchy(
         snapshot: XCUIElementSnapshot,
         inheritedOffset: CGVector,
-        parentWindowContextID: Double?
+        parentWindowContextID: Double?,
+        parentFrame: AXFrame?,
+        parentIsRemote: Bool?,
+        visibleHostAnchor: VisibleHostAnchor?
     ) -> AXElement {
         let rawFrame = axFrame(from: snapshot.frame)
         let windowContextID = kvcDouble(snapshot, "windowContextID") ?? 0
@@ -326,18 +330,26 @@ struct ViewHierarchyHandler: HTTPHandler {
             snapshot: snapshot,
             rawFrame: rawFrame,
             parentWindowContextID: parentWindowContextID,
-            windowContextID: windowContextID
+            windowContextID: windowContextID,
+            parentFrame: parentFrame,
+            parentIsRemote: parentIsRemote,
+            visibleHostAnchor: visibleHostAnchor
         )
         let currentOffset = CGVector(
             dx: inheritedOffset.dx + boundaryOffset.dx,
             dy: inheritedOffset.dy + boundaryOffset.dy
         )
 
+        let nextAnchor = VisibleHostAnchor.advance(previous: visibleHostAnchor, rawFrame: rawFrame,
+            visibleFrame: visibleFrame(snapshot), windowContextID: windowContextID, isRemote: remoteValue(snapshot))
         let children = snapshot.children.map { child in
             elementHierarchy(
                 snapshot: child,
                 inheritedOffset: currentOffset,
-                parentWindowContextID: windowContextID
+                parentWindowContextID: windowContextID,
+                parentFrame: rawFrame,
+                parentIsRemote: remoteValue(snapshot),
+                visibleHostAnchor: nextAnchor
             )
         }
 
@@ -360,36 +372,28 @@ struct ViewHierarchyHandler: HTTPHandler {
         )
     }
 
-    /// Offset to apply to descendant frames when crossing into a cross-process
-    /// window (e.g. HealthKit/share sheet). All three signals — windowContextID
-    /// transition, remote subtree, finite visibleFrame — must align; the remote
-    /// check guards against in-process boundaries like UITextEffectsWindow where
-    /// a non-zero visibleFrame delta is ordinary clipping.
+    /// Preserve the existing visible-frame correction. Some remote roots report CGRect.null;
+    /// only a confirmed visible host with matching geometry can supply their translation.
     private func crossProcessWindowOffset(
         snapshot: XCUIElementSnapshot,
         rawFrame: AXFrame,
         parentWindowContextID: Double?,
-        windowContextID: Double
+        windowContextID: Double,
+        parentFrame: AXFrame?,
+        parentIsRemote: Bool?,
+        visibleHostAnchor: VisibleHostAnchor?
     ) -> CGVector {
-        guard isCrossWindowContextBoundary(parentWindowContextID: parentWindowContextID, windowContextID: windowContextID),
-              containsRemoteSubtree(snapshot),
-              let visibleFrame = visibleFrame(snapshot) else {
-            return .zero
-        }
-
-        return CGVector(
-            dx: visibleFrame.x - rawFrame.x,
-            dy: visibleFrame.y - rawFrame.y
+        CrossProcessWindowGeometry.offset(
+            rawFrame: rawFrame,
+            parentFrame: parentFrame,
+            parentWindowContextID: parentWindowContextID,
+            windowContextID: windowContextID,
+            remoteSubtree: containsRemoteSubtree(snapshot),
+            parentIsRemote: parentIsRemote,
+            visibleFrame: visibleFrame(snapshot),
+            allowsHostFallback: hasNullVisibleFrame(snapshot),
+            visibleHostAnchor: visibleHostAnchor
         )
-    }
-
-    private func isCrossWindowContextBoundary(parentWindowContextID: Double?, windowContextID: Double) -> Bool {
-        guard let parentWindowContextID = parentWindowContextID else {
-            return false
-        }
-        return parentWindowContextID != 0
-            && windowContextID != 0
-            && parentWindowContextID != windowContextID
     }
 
     private func containsRemoteSubtree(_ snapshot: XCUIElementSnapshot) -> Bool {
@@ -398,11 +402,20 @@ struct ViewHierarchyHandler: HTTPHandler {
     }
 
     private func isRemote(_ snapshot: XCUIElementSnapshot) -> Bool {
+        remoteValue(snapshot) ?? false
+    }
+
+    private func remoteValue(_ snapshot: XCUIElementSnapshot) -> Bool? {
         guard let snapshotObject = snapshot as? NSObject,
-              snapshotObject.responds(to: NSSelectorFromString("isRemote")) else {
-            return false
-        }
-        return (snapshotObject.value(forKey: "isRemote") as? NSNumber)?.boolValue ?? false
+              snapshotObject.responds(to: NSSelectorFromString("isRemote")) else { return nil }
+        return (snapshotObject.value(forKey: "isRemote") as? NSNumber)?.boolValue
+    }
+
+    private func hasNullVisibleFrame(_ snapshot: XCUIElementSnapshot) -> Bool {
+        guard let object = snapshot as? NSObject,
+              object.responds(to: NSSelectorFromString("visibleFrame")),
+              let value = object.value(forKey: "visibleFrame") as? NSValue else { return false }
+        return value.cgRectValue.isNull
     }
 
     private func visibleFrame(_ snapshot: XCUIElementSnapshot) -> AXFrame? {
@@ -463,5 +476,71 @@ struct ViewHierarchyHandler: HTTPHandler {
             "Width": frame.width,
             "Height": frame.height
         ]
+    }
+}
+
+/// Pure geometry for cross-process roots; `visibleFrame` has already been validated.
+/// Fallback is intentionally limited to an unscaled remote root filling its host.
+enum CrossProcessWindowGeometry {
+    static func offset(
+        rawFrame: AXFrame,
+        parentFrame: AXFrame?,
+        parentWindowContextID: Double?,
+        windowContextID: Double,
+        remoteSubtree: Bool,
+        parentIsRemote: Bool?,
+        visibleFrame: AXFrame?,
+        allowsHostFallback: Bool,
+        visibleHostAnchor: VisibleHostAnchor?
+    ) -> CGVector {
+        guard let parentWindowContextID = parentWindowContextID,
+              parentWindowContextID != 0, windowContextID != 0,
+              parentWindowContextID != windowContextID, remoteSubtree else {
+            return .zero
+        }
+        if let visibleFrame = visibleFrame {
+            return CGVector(dx: visibleFrame.x - rawFrame.x, dy: visibleFrame.y - rawFrame.y)
+        }
+        guard allowsHostFallback, parentWindowContextID.isFinite, windowContextID.isFinite,
+              parentIsRemote == false, let parentFrame = parentFrame,
+              let anchor = visibleHostAnchor, anchor.windowContextID == parentWindowContextID,
+              anchor.frame == parentFrame,
+              parentFrame.x.isFinite, parentFrame.y.isFinite,
+              parentFrame.width.isFinite, parentFrame.height.isFinite,
+              parentFrame.width > 0, parentFrame.height > 0,
+              rawFrame.x == 0, rawFrame.y == 0,
+              rawFrame.width == parentFrame.width, rawFrame.height == parentFrame.height else {
+            return .zero
+        }
+        // Both frames are in their respective window coordinate spaces. The caller adds
+        // its inherited offset exactly once; applying it here would double nested shifts.
+        return CGVector(dx: parentFrame.x - rawFrame.x, dy: parentFrame.y - rawFrame.y)
+    }
+}
+
+/// Tracks a confirmed visible host through the observed same-origin proxy chain.
+/// A zero-size proxy may bridge the chain, but the parent must restore the full anchor
+/// frame before CrossProcessWindowGeometry accepts a remote-root translation.
+struct VisibleHostAnchor {
+    let frame: AXFrame
+    let windowContextID: Double
+
+    static func advance(previous: VisibleHostAnchor?, rawFrame: AXFrame, visibleFrame: AXFrame?,
+                        windowContextID: Double, isRemote: Bool?) -> VisibleHostAnchor? {
+        guard isRemote == false, windowContextID.isFinite, windowContextID != 0,
+              let visibleFrame = visibleFrame else { return nil }
+        let finite = [rawFrame.x, rawFrame.y, rawFrame.width, rawFrame.height,
+                      visibleFrame.x, visibleFrame.y, visibleFrame.width, visibleFrame.height].allSatisfy(\.isFinite)
+        guard finite else { return nil }
+        if rawFrame.width > 0, rawFrame.height > 0, rawFrame == visibleFrame {
+            return VisibleHostAnchor(frame: rawFrame, windowContextID: windowContextID)
+        }
+        guard let previous = previous, previous.windowContextID == windowContextID else { return nil }
+        let sameOrigin = rawFrame.x == previous.frame.x && rawFrame.y == previous.frame.y
+            && visibleFrame.x == previous.frame.x && visibleFrame.y == previous.frame.y
+        let visibleZeroProxy = visibleFrame.width == 0 && visibleFrame.height == 0
+        let rawZeroProxy = rawFrame.width == 0 && rawFrame.height == 0
+        guard sameOrigin, visibleZeroProxy, rawZeroProxy || rawFrame == previous.frame else { return nil }
+        return previous
     }
 }
