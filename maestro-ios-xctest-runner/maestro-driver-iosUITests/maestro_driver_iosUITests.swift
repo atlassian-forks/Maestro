@@ -144,6 +144,50 @@ final class RemoteWindowCoordinateTests: XCTestCase {
         )
     }
 
+    func testSameWindowDoesNotReadPrivateSnapshotMetadata() {
+        var reads: [String] = []
+        func read<T>(_ name: String, _ value: T) -> T { reads.append(name); return value }
+        XCTAssertEqual(CrossProcessWindowGeometry.offset(
+            rawFrame: frame(0, 0, 384, 364), parentFrame: frame(9, 501, 384, 364),
+            parentWindowContextID: 1, windowContextID: 1,
+            remoteSubtree: read("remote", true), parentIsRemote: read("parent", false),
+            visibleFrame: read("visible", nil), allowsHostFallback: read("null", true),
+            visibleHostAnchor: read("anchor", nil)), .zero)
+        XCTAssertTrue(reads.isEmpty)
+    }
+
+    func testFiniteVisibleFrameDoesNotResolveFallbackMetadata() {
+        var reads: [String] = []
+        func read<T>(_ name: String, _ value: T) -> T { reads.append(name); return value }
+        XCTAssertEqual(CrossProcessWindowGeometry.offset(
+            rawFrame: frame(0, 0, 384, 364), parentFrame: frame(9, 501, 384, 364),
+            parentWindowContextID: 1, windowContextID: 2,
+            remoteSubtree: read("remote", true), parentIsRemote: read("parent", false),
+            visibleFrame: read("visible", frame(9, 501, 384, 364)),
+            allowsHostFallback: read("null", true), visibleHostAnchor: read("anchor", nil)),
+            CGVector(dx: 9, dy: 501))
+        XCTAssertEqual(reads, ["remote", "visible"])
+    }
+
+    func testConfirmedVisibleAnchorDoesNotResolveEarlierAncestors() {
+        var previousReads = 0
+        func previous() -> VisibleHostAnchor? { previousReads += 1; return nil }
+        let full = frame(9, 501, 384, 364)
+        let anchor = VisibleHostAnchor.advance(previous: previous(), rawFrame: full,
+            visibleFrame: full, windowContextID: 1, isRemote: false)
+        XCTAssertEqual(anchor?.frame, full)
+        XCTAssertEqual(previousReads, 0)
+    }
+
+    func testRemoteHostDoesNotResolveVisibleFrameOrAncestors() {
+        var reads: [String] = []
+        func read<T>(_ name: String, _ value: T) -> T { reads.append(name); return value }
+        XCTAssertNil(VisibleHostAnchor.advance(previous: read("previous", nil),
+            rawFrame: frame(9, 501, 384, 364), visibleFrame: read("visible", nil),
+            windowContextID: 1, isRemote: true))
+        XCTAssertTrue(reads.isEmpty)
+    }
+
     func testObservedShareBoundaryWithoutVisibleFrameUsesHostTranslation() {
         XCTAssertEqual(offset(), CGVector(dx: 9, dy: 501))
     }
