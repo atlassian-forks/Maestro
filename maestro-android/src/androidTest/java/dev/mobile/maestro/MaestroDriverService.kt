@@ -69,7 +69,6 @@ import maestro_android.viewHierarchyResponse
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
-import java.io.OutputStream
 import java.util.Timer
 import java.util.TimerTask
 import kotlin.system.measureTimeMillis
@@ -268,27 +267,61 @@ class Service(
     override fun addMedia(responseObserver: StreamObserver<MaestroAndroid.AddMediaResponse>): StreamObserver<MaestroAndroid.AddMediaRequest> {
         return object : StreamObserver<MaestroAndroid.AddMediaRequest> {
 
-            var outputStream: OutputStream? = null
+            var pendingMedia: PendingMedia? = null
+            var terminated = false
 
             override fun onNext(value: MaestroAndroid.AddMediaRequest) {
-                if (outputStream == null) {
-                    outputStream = MediaStorage.getOutputStream(
+                if (terminated) {
+                    return
+                }
+
+                try {
+                    val media = pendingMedia ?: MediaStorage.createPendingMedia(
                         value.mediaName,
                         value.mediaExt
-                    )
+                    ).also { pendingMedia = it }
+                    value.payload.data.writeTo(media.outputStream)
+                } catch (t: Throwable) {
+                    fail(t)
                 }
-                value.payload.data.writeTo(outputStream)
             }
 
             override fun onError(t: Throwable) {
-                responseObserver.onError(t.internalError())
+                fail(t)
             }
 
             override fun onCompleted() {
+                if (terminated) {
+                    return
+                }
+
+                val media = try {
+                    checkNotNull(pendingMedia) { "No media data was received" }
+                } catch (t: Throwable) {
+                    fail(t)
+                    return
+                }
+                try {
+                    media.publish()
+                } catch (t: Throwable) {
+                    fail(t)
+                    return
+                }
+
+                terminated = true
                 responseObserver.onNext(addMediaResponse { })
                 responseObserver.onCompleted()
             }
 
+            private fun fail(t: Throwable) {
+                if (terminated) {
+                    return
+                }
+
+                terminated = true
+                pendingMedia?.abort()
+                responseObserver.onError(t.internalError())
+            }
         }
     }
 
