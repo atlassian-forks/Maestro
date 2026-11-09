@@ -1,6 +1,7 @@
 import XCTest
 import FlyingFox
 import os
+import MaestroDriverLib
 
 final class maestro_driver_iosUITests: XCTestCase {
    
@@ -31,6 +32,50 @@ final class maestro_driver_iosUITests: XCTestCase {
 
     override class func tearDown() {
         logger.trace("tearDown")
+    }
+}
+
+/// Exercises the real snapshot response: removing the separate status-bar query must
+/// preserve both system elements and the foreground app's accessibility hierarchy.
+@MainActor
+final class ViewHierarchySnapshotIntegrationTests: XCTestCase {
+    func testStatusBarAndForegroundAppRemainInHierarchy() async throws {
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.launch()
+        defer { settings.terminate() }
+
+        let settingsLabel = settings.label
+        let hierarchy = try await requestHierarchy(appId: settings.bundleID)
+        let elements = flatten(hierarchy.axElement)
+
+        XCTAssertTrue(elements.contains { $0.elementType == Int(XCUIElement.ElementType.statusBar.rawValue) },
+                      "The response must retain the status bar from the SpringBoard snapshot")
+        XCTAssertTrue(elements.contains {
+            $0.elementType == Int(XCUIElement.ElementType.application.rawValue) && $0.label == settingsLabel
+        }, "The response must retain the foreground application's hierarchy")
+    }
+
+    func testHomeScreenRetainsStatusBarAndIcons() async throws {
+        XCUIDevice.shared.press(.home)
+        let hierarchy = try await requestHierarchy(appId: "com.apple.springboard")
+        let elements = flatten(hierarchy.axElement)
+
+        XCTAssertTrue(elements.contains { $0.elementType == Int(XCUIElement.ElementType.statusBar.rawValue) })
+        XCTAssertTrue(elements.contains { $0.elementType == Int(XCUIElement.ElementType.icon.rawValue) },
+                      "The home screen response must retain its app icons")
+    }
+
+    private func requestHierarchy(appId: String) async throws -> ViewHierarchy {
+        let body = try JSONEncoder().encode(ViewHierarchyRequest(appIds: [appId], excludeKeyboardElements: false))
+        let request = HTTPRequest(method: .POST, version: .http11, path: "/viewHierarchy",
+                                  query: [], headers: [:], body: body)
+        let response = try await ViewHierarchyHandler().handleRequest(request)
+        XCTAssertEqual(response.statusCode, .ok)
+        return try await JSONDecoder().decode(ViewHierarchy.self, from: response.bodyData)
+    }
+
+    private func flatten(_ element: AXElement) -> [AXElement] {
+        [element] + (element.children ?? []).flatMap { flatten($0) }
     }
 }
 

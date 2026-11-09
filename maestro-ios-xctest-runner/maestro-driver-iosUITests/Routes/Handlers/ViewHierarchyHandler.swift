@@ -30,6 +30,9 @@ struct ViewHierarchyHandler: HTTPHandler {
             }
             NSLog("[Start] View hierarchy snapshot for \(foregroundApp)")
             let appViewHierarchy = try await getAppViewHierarchy(foregroundApp: foregroundApp, excludeKeyboardElements: requestBody.excludeKeyboardElements)
+            // This snapshot includes status bars. Querying them separately with
+            // exists/allElementsBoundByIndex can terminate XCTest during an AX race:
+            // https://github.com/mobile-dev-inc/Maestro/issues/3538
             let springboardHierarchy = try elementHierarchy(xcuiElement: springboardApplication)
 
             let combinedAXElement = AXElement(children: [springboardHierarchy, appViewHierarchy])
@@ -59,10 +62,6 @@ struct ViewHierarchyHandler: HTTPHandler {
         let appHierarchy = try getHierarchyWithFallback(foregroundApp)
         await SystemPermissionHelper.handleSystemPermissionAlertIfNeeded(appHierarchy: appHierarchy, foregroundApp: foregroundApp)
                 
-        let statusBars = logger.measure(message: "Fetch status bar hierarchy") {
-            fullStatusBars(springboardApplication)
-        } ?? []
-        
         // Fetch Safari WebView hierarchy for iOS 26+ (runs in separate SafariViewService process)
         let safariWebViewHierarchy = logger.measure(message: "Fetch Safari WebView hierarchy") {
             getSafariWebViewHierarchy()
@@ -84,7 +83,7 @@ struct ViewHierarchyHandler: HTTPHandler {
                 let appWidth = appFrame["Width"], appWidth > 0,
                 let appHeight = appFrame["Height"], appHeight > 0
             else {
-                return AXElement(children: [appHierarchy, AXElement(children: statusBars), safariWebViewHierarchy].compactMap { $0 })
+                return AXElement(children: [appHierarchy, safariWebViewHierarchy].compactMap { $0 })
             }
 
             // Springboard always reports its frame in portrait dimensions (e.g. 1024×1366),
@@ -98,7 +97,7 @@ struct ViewHierarchyHandler: HTTPHandler {
 
             if isSameAreaDifferentOrientation {
                 NSLog("Skipping offset adjustment: device and app frames are same size but different orientation")
-                return AXElement(children: [appHierarchy, AXElement(children: statusBars), safariWebViewHierarchy].compactMap { $0 })
+                return AXElement(children: [appHierarchy, safariWebViewHierarchy].compactMap { $0 })
             }
 
             let offsetX = deviceWidth - appWidth
@@ -109,9 +108,9 @@ struct ViewHierarchyHandler: HTTPHandler {
 
             let adjustedAppHierarchy = expandElementSizes(appHierarchy, offset: offset)
 
-            return AXElement(children: [adjustedAppHierarchy, AXElement(children: statusBars), safariWebViewHierarchy].compactMap { $0 })
+            return AXElement(children: [adjustedAppHierarchy, safariWebViewHierarchy].compactMap { $0 })
         } else {
-            return AXElement(children: [appHierarchy, AXElement(children: statusBars), safariWebViewHierarchy].compactMap { $0 })
+            return AXElement(children: [appHierarchy, safariWebViewHierarchy].compactMap { $0 })
         }
     }
     
@@ -246,18 +245,6 @@ struct ViewHierarchyHandler: HTTPHandler {
         
         let alert = element.alerts.firstMatch
         return try? elementHierarchy(xcuiElement: alert)
-    }
-    
-    func fullStatusBars(_ element: XCUIApplication) -> [AXElement]? {
-        guard element.statusBars.firstMatch.exists else {
-            return nil
-        }
-        
-        let snapshots = try? element.statusBars.allElementsBoundByIndex.compactMap{ (statusBar) in
-            try elementHierarchy(xcuiElement: statusBar)
-        }
-        
-        return snapshots
     }
     
     /// Fetches the Safari WebView hierarchy for iOS 26+ where SFSafariViewController
