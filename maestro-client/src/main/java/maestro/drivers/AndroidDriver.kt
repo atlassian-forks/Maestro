@@ -1184,7 +1184,11 @@ class AndroidDriver(
             }
 
             if (node.hasAttribute("class")) {
-                attributesBuilder["class"] = node.getAttribute("class")
+                val className = node.getAttribute("class")
+                attributesBuilder["class"] = className
+                if (className == "android.webkit.WebView" && node.hasAttribute("package")) {
+                    attributesBuilder["package"] = node.getAttribute("package")
+                }
             }
 
             if (node.hasAttribute("important-for-accessibility")) {

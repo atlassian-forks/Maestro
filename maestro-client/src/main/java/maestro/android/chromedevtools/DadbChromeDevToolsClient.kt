@@ -100,9 +100,13 @@ class DadbChromeDevToolsClient(private val connection: AndroidDeviceConnection):
         okhttp.cache?.close()
     }
 
-    override fun getWebViewTreeNodes(): List<TreeNode> {
-        return getWebViewInfos()
-            .filter { it.visible }
+    override fun getWebViewTreeNodes(): List<TreeNode> = readTreeNodes(getWebViewInfos())
+
+    override fun getWebViewTreeNodes(appPackages: Set<String>): List<TreeNode> =
+        readTreeNodes(getWebViewInfos(appPackages))
+
+    private fun readTreeNodes(webViews: List<WebViewInfo>): List<TreeNode> {
+        return webViews.filter { it.visible }
             .mapNotNull { info ->
                 try {
                     evaluateScript<RuntimeResponse<TreeNode>>(info.socketName, info.webSocketDebuggerUrl, "$script; maestro.viewportX = ${info.screenX}; maestro.viewportY = ${info.screenY}; maestro.viewportWidth = ${info.width}; maestro.viewportHeight = ${info.height}; window.maestro.getContentDescription();").result.value
@@ -150,8 +154,10 @@ class DadbChromeDevToolsClient(private val connection: AndroidDeviceConnection):
         }
     }
 
-    fun getWebViewInfos(): List<WebViewInfo> {
-        return getWebViewSocketNames().flatMap(::getWebViewInfos)
+    fun getWebViewInfos(): List<WebViewInfo> = getWebViewInfos(null)
+
+    private fun getWebViewInfos(appPackages: Set<String>?): List<WebViewInfo> {
+        return getWebViewSocketNames(appPackages).flatMap(::getWebViewInfos)
     }
 
     fun makeSingleWebsocketRequest(url: HttpUrl, message: String): String {
@@ -231,18 +237,42 @@ class DadbChromeDevToolsClient(private val connection: AndroidDeviceConnection):
         }
     }
 
-    private fun getWebViewSocketNames(): Set<String> {
+    private fun getWebViewSocketNames(appPackages: Set<String>?): Set<String> {
         val response = connection.shell("cat /proc/net/unix")
         if (response.exitCode != 0) {
             throw IllegalStateException("Failed get WebView socket names. Command 'cat /proc/net/unix' failed: ${response.allOutput}")
         }
-        return response.allOutput.trim().lines().mapNotNull { line ->
-            line.split(Regex("\\s+")).lastOrNull()?.takeIf { it.startsWith(WEB_VIEW_SOCKET_PREFIX) }?.substring(1)
-        }.toSet()
+        val socketPids = response.allOutput.lineSequence()
+            .mapNotNull { WEB_VIEW_SOCKET.find(it)?.groupValues?.get(1) }
+            .toSet()
+        if (socketPids.isEmpty()) return emptySet()
+
+        val selectedPids = if (appPackages == null) socketPids else {
+            val appPids = appPackages.flatMap(::getPackageProcessIds).toSet()
+            socketPids.intersect(appPids).also {
+                logger.debug("WebView inspection for {} selected PIDs {} from {}", appPackages, it, socketPids)
+            }
+        }
+        return selectedPids.mapTo(mutableSetOf()) { "$WEB_VIEW_SOCKET_PREFIX$it" }
+    }
+
+    private fun getPackageProcessIds(packageName: String): List<String> {
+        if (!ANDROID_PACKAGE_NAME.matches(packageName)) return emptyList()
+        // ActivityManager tracks package membership even for custom process names and managed profiles.
+        val response = connection.shell("dumpsys activity processes $packageName")
+        if (response.exitCode != 0) {
+            logger.warn("Cannot determine WebView processes for {} (dumpsys exit {})", packageName, response.exitCode)
+            return emptyList()
+        }
+        return PROCESS_RECORD.findAll(response.allOutput).map { it.groupValues[1] }.toList()
     }
 
     companion object {
-        private const val WEB_VIEW_SOCKET_PREFIX = "@webview_devtools_remote_"
+        private const val WEB_VIEW_SOCKET_PREFIX = "webview_devtools_remote_"
+        private val WEB_VIEW_SOCKET = Regex("""\s@${WEB_VIEW_SOCKET_PREFIX}(\S*)\s*$""")
+        private val ANDROID_PACKAGE_NAME = Regex("[A-Za-z0-9_.]+")
+        private val PROCESS_RECORD =
+            Regex("""^\s*\*(?:APP|PERS)\* UID \d+ ProcessRecord\{\S+ (\d+):""", RegexOption.MULTILINE)
 
         private val logger = LoggerFactory.getLogger(Maestro::class.java)
     }

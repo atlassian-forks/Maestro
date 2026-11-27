@@ -29,16 +29,17 @@ class AndroidWebViewHierarchyClient(
 
     fun augmentHierarchy(baseHierarchy: TreeNode, chromeDevToolsEnabled: Boolean): TreeNode {
         if (!chromeDevToolsEnabled) return baseHierarchy
-        if (!hasWebView(baseHierarchy)) return baseHierarchy
         // TODO: Adapt to handle chrome in the same way
-        val webViewHierarchy = fetchWebViewNodes() ?: return baseHierarchy
-        val merged = mergeHierarchies(baseHierarchy, webViewHierarchy)
-        return merged
+        val appPackages = mutableSetOf<String>()
+        collectWebViewPackages(baseHierarchy, appPackages)
+        if (appPackages.isEmpty()) return baseHierarchy
+        val webViewHierarchy = fetchWebViewNodes(appPackages) ?: return baseHierarchy
+        return mergeHierarchies(baseHierarchy, webViewHierarchy)
     }
 
     // Null on timeout → caller falls back to the native hierarchy. Real fetch failures propagate.
-    private fun fetchWebViewNodes(): List<TreeNode>? {
-        val future = augmentExecutor.submit(Callable { devToolsClient.getWebViewTreeNodes() })
+    private fun fetchWebViewNodes(appPackages: Set<String>): List<TreeNode>? {
+        val future = augmentExecutor.submit(Callable { devToolsClient.getWebViewTreeNodes(appPackages) })
         return try {
             future.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
         } catch (e: TimeoutException) {
@@ -132,16 +133,11 @@ class AndroidWebViewHierarchyClient(
             return this.x < other.x + other.width && this.x + this.width > other.x && this.y < other.y + other.height && this.y + this.height > other.y
         }
 
-        private fun hasWebView(node: TreeNode): Boolean {
-            if (isWebView(node)) return true
-            for (child in node.children) {
-                if (hasWebView(child)) return true
+        private fun collectWebViewPackages(node: TreeNode, packages: MutableSet<String>) {
+            if (node.attributes["class"] == "android.webkit.WebView") {
+                node.attributes["package"]?.takeIf(String::isNotBlank)?.let(packages::add)
             }
-            return false
-        }
-
-        private fun isWebView(node: TreeNode): Boolean {
-            return node.attributes["class"] == "android.webkit.WebView"
+            node.children.forEach { collectWebViewPackages(it, packages) }
         }
     }
 }

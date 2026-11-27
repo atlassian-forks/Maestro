@@ -13,6 +13,34 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class AndroidWebViewHierarchyClientTest {
 
+    @Test
+    fun `WebView inspection follows the apps on screen`() {
+        val first =
+            TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView", "package" to "com.example.first"))
+        val second =
+            TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView", "package" to "com.example.second"))
+        val keyboard =
+            TreeNode(attributes = mutableMapOf("class" to "android.view.View", "package" to "com.example.keyboard"))
+        val inspected = mutableListOf<Set<String>>()
+        val devTools = object : ChromeDevToolsClient {
+            override fun getWebViewTreeNodes(): List<TreeNode> = error("Expected a package-scoped lookup")
+            override fun getWebViewTreeNodes(appPackages: Set<String>): List<TreeNode> {
+                inspected.add(appPackages)
+                return emptyList()
+            }
+            override fun close() {}
+        }
+        AndroidWebViewHierarchyClient(devTools).use { client ->
+            client.augmentHierarchy(TreeNode(children = listOf(first, second, keyboard)), true)
+            client.augmentHierarchy(TreeNode(children = listOf(second, keyboard)), true)
+            client.augmentHierarchy(keyboard, true)
+        }
+        assertThat(inspected).containsExactly(
+            setOf("com.example.first", "com.example.second"),
+            setOf("com.example.second"),
+        ).inOrder()
+    }
+
     // Simulates a dead WebView devtools endpoint: the fetch never returns.
     private class HangingDevToolsClient : ChromeDevToolsClient {
         val started = CountDownLatch(1)
@@ -29,7 +57,7 @@ class AndroidWebViewHierarchyClientTest {
         // Base hierarchy contains a WebView node, so augmentation is attempted.
         val base = TreeNode(
             children = listOf(
-                TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView"))
+                TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView", "package" to "com.example.app"))
             )
         )
         val hanging = HangingDevToolsClient()
@@ -54,7 +82,7 @@ class AndroidWebViewHierarchyClientTest {
             override fun close() {}
         })
         val base = TreeNode(
-            children = listOf(TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView")))
+            children = listOf(TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView", "package" to "com.example.app")))
         )
 
         val thrown = assertThrows<IllegalStateException> {
@@ -66,7 +94,7 @@ class AndroidWebViewHierarchyClientTest {
     @Test
     fun augmentHierarchy_oneWedgedFetchDoesNotBlockLaterFetches() {
         val base = TreeNode(
-            children = listOf(TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView")))
+            children = listOf(TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView", "package" to "com.example.app")))
         )
         val calls = AtomicInteger(0)
         val client = AndroidWebViewHierarchyClient(
@@ -119,7 +147,7 @@ class AndroidWebViewHierarchyClientTest {
 
         // Run a fetch on a background thread so one is genuinely in flight when we close().
         val base = TreeNode(
-            children = listOf(TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView")))
+            children = listOf(TreeNode(attributes = mutableMapOf("class" to "android.webkit.WebView", "package" to "com.example.app")))
         )
         val fetchThread = Thread { runCatching { client.augmentHierarchy(base, chromeDevToolsEnabled = true) } }
             .apply { isDaemon = true; start() }
