@@ -1145,8 +1145,11 @@ class AndroidDriver(
                 attributesBuilder["hintText"] = node.getAttribute("hintText")
             }
 
-            val className = node.getAttribute("class")
-            attributesBuilder["ignoreBoundsFiltering"] = (className == TOAST_CLASS_NAME).toString()
+            if (node.hasAttribute("class") && node.getAttribute("class") == TOAST_CLASS_NAME) {
+                attributesBuilder["ignoreBoundsFiltering"] = true.toString()
+            } else {
+                attributesBuilder["ignoreBoundsFiltering"] = false.toString()
+            }
 
             if (node.hasAttribute("resource-id")) {
                 attributesBuilder["resource-id"] = node.getAttribute("resource-id")
@@ -1181,11 +1184,11 @@ class AndroidDriver(
             }
 
             if (node.hasAttribute("class")) {
+                val className = node.getAttribute("class")
                 attributesBuilder["class"] = className
-            }
-
-            if (className == "android.webkit.WebView" && node.hasAttribute("package")) {
-                attributesBuilder["package"] = node.getAttribute("package")
+                if (className == "android.webkit.WebView" && node.hasAttribute("package")) {
+                    attributesBuilder["package"] = node.getAttribute("package")
+                }
             }
 
             if (node.hasAttribute("important-for-accessibility")) {
